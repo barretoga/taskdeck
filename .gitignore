@@ -1,0 +1,9 @@
+# Build output
+/target/
+*.exe
+*.pdb
+
+# Per-machine files created next to the exe at runtime
+taskdeck.ini
+mousebar.ini
+taskdeck-crash.log
