@@ -1,4 +1,4 @@
-# Build output
+﻿# Build output
 /target/
 *.exe
 *.pdb
@@ -7,3 +7,6 @@
 taskdeck.ini
 mousebar.ini
 taskdeck-crash.log
+taskdeck.log
+taskdeck.log.1
+/crashes/

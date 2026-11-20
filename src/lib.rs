@@ -1,6 +1,7 @@
-pub mod audio;
+﻿pub mod audio;
 pub mod battery;
 pub mod config;
+pub mod diag;
 pub mod media;
 pub mod render;
 pub mod spectrum;

@@ -72,6 +72,9 @@ pub fn start() {
                     if let Ok(mut s) = STATUS.lock() {
                         *s = format!("{exe} pid {pid}: {r:?}");
                     }
+                    if let Err(e) = &r {
+                        crate::diag::log(&format!("audio capture of {exe} (pid {pid}) failed: {e}"));
+                    }
                     if r.is_err() {
                         std::thread::sleep(Duration::from_secs(2));
                     }

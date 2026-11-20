@@ -1,4 +1,4 @@
-//! Mouse battery level.
+﻿//! Mouse battery level.
 //!
 //! 2.4 GHz receiver (Attack Shark X11, 1D57:FA60): the mouse sends a status input
 //! report on its own every ~2 s on interface 2, collection with usage page 0x000A:
@@ -47,6 +47,7 @@ pub fn start_receiver(owner: HWND, notify_msg: u32, vid: u16, pid: u16) {
                 .device_list()
                 .find(|d| d.vendor_id() == vid && d.product_id() == pid && d.usage_page() == 0x000A);
             if let Some(dev) = info.and_then(|d| d.open_device(&api).ok()) {
+                crate::diag::log(&format!("mouse receiver {vid:04X}:{pid:04X} opened"));
                 let mut buf = [0u8; 64];
                 loop {
                     match dev.read_timeout(&mut buf, 5000) {
@@ -67,7 +68,11 @@ pub fn start_receiver(owner: HWND, notify_msg: u32, vid: u16, pid: u16) {
                             }
                         }
                         Ok(_) => {}
-                        Err(_) => break, // unplugged: look for it again
+                        Err(e) => {
+                            // Unplugged, or the device was reset by sleep: look for it again.
+                            crate::diag::log(&format!("mouse receiver lost: {e}"));
+                            break;
+                        }
                     }
                 }
             }

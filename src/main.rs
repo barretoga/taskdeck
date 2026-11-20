@@ -13,12 +13,12 @@ use taskdeck::render::{Item, MediaView, Rgb, View};
 use taskdeck::spectrum::{self, BANDS};
 use taskdeck::voicemeeter::Voicemeeter;
 use taskdeck::widget::{self, Widget, WM_WIDGET_CLICK, WM_WIDGET_HOVER, WM_WIDGET_MENU};
-use taskdeck::{battery, resolve_mic, targets};
+use taskdeck::{battery, diag, resolve_mic, targets};
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
+
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
@@ -36,6 +36,12 @@ const TIMER_BARS: usize = 4;
 const BARS_MS: u32 = 33; // ~30 fps, only while music plays
 const WM_MEDIA: u32 = WM_APP + 20;
 const WM_BATTERY: u32 = WM_APP + 21;
+const TIMER_HEARTBEAT: usize = 5;
+const HEARTBEAT_MS: u32 = 10 * 60 * 1000;
+/// Power events (WM_POWERBROADCAST).
+const PBT_APMSUSPEND: usize = 0x4;
+const PBT_APMRESUMESUSPEND: usize = 0x7;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x12;
 
 const CMD_EXIT: usize = 100;
 const CMD_AUTOSTART: usize = 101;
@@ -58,6 +64,7 @@ struct App {
     taskbar_created: u32,
     bars: [f32; BANDS],
     bars_running: bool,
+    media_source: Option<&'static str>,
 }
 
 thread_local! {
@@ -74,47 +81,106 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     })
 }
 
-/// Appends a line to taskdeck-crash.log next to the exe.
-fn log_crash(line: &str) {
-    use std::io::Write;
-    let path = config::path().with_file_name("taskdeck-crash.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "[unix {secs}] {line}");
+/// A resident taskbar app must not live inside someone else's job object: when a
+/// terminal or tool host that started it closes its job, Windows kills every
+/// process in it, with no crash report. If we were started like that, start a
+/// fresh copy whose parent is the taskbar's Explorer (outside any job; a child
+/// inherits the job of the parent it is created for) and let this one exit.
+///
+/// The copy gets `--detached` and never relaunches again, so this cannot loop.
+/// Pass `--attached` to stay attached on purpose (e.g. while debugging).
+fn relaunch_outside_job() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if !diag::in_job() || args.iter().any(|a| a == "--attached") {
+        return false;
     }
+    if args.iter().any(|a| a == "--detached") {
+        diag::log("still inside a job after relaunching; staying in this process");
+        return false;
+    }
+    let r = unsafe { spawn_from_shell() };
+    diag::log(&format!("started inside a job object; relaunched as a child of Explorer: {r:?}"));
+    r.is_ok()
 }
 
-/// Last-chance handler: records native crashes (access violations) with the
-/// faulting address, so they can be traced later.
-unsafe extern "system" fn crash_filter(info: *const EXCEPTION_POINTERS) -> i32 {
-    if let Some(rec) = info.as_ref().and_then(|i| i.ExceptionRecord.as_ref()) {
-        let exe = GetModuleHandleW(None).map(|h| h.0 as usize).unwrap_or(0);
-        let user32 = GetModuleHandleW(w!("user32.dll")).map(|h| h.0 as usize).unwrap_or(0);
-        let addr = rec.ExceptionAddress as usize;
-        log_crash(&format!(
-            "exception 0x{:08X} at 0x{addr:X} (exe+0x{:X}, user32+0x{:X}) info={:?}",
-            rec.ExceptionCode.0,
-            addr.wrapping_sub(exe),
-            addr.wrapping_sub(user32),
-            &rec.ExceptionInformation[..rec.NumberParameters.min(2) as usize]
-        ));
-    }
-    0 // EXCEPTION_CONTINUE_SEARCH
-}
+/// Starts this exe with `--detached`, parented to the shell (taskbar) Explorer.
+unsafe fn spawn_from_shell() -> windows::core::Result<()> {
+    use std::ffi::c_void;
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, OpenProcess,
+        UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATE_PROCESS,
+        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, STARTUPINFOEXW,
+    };
 
+    let shell = GetShellWindow();
+    if shell.is_invalid() {
+        return Err(windows::core::Error::from_win32());
+    }
+    let mut shell_pid = 0u32;
+    GetWindowThreadProcessId(shell, Some(&mut shell_pid));
+    let parent = OpenProcess(PROCESS_CREATE_PROCESS, false, shell_pid)?;
+
+    let mut size = 0usize;
+    let _ = InitializeProcThreadAttributeList(LPPROC_THREAD_ATTRIBUTE_LIST::default(), 1, 0, &mut size);
+    let mut buf = vec![0u8; size];
+    let list = LPPROC_THREAD_ATTRIBUTE_LIST(buf.as_mut_ptr() as *mut c_void);
+    let result = (|| {
+        InitializeProcThreadAttributeList(list, 1, 0, &mut size)?;
+        UpdateProcThreadAttribute(
+            list,
+            0,
+            PROC_THREAD_ATTRIBUTE_PARENT_PROCESS as usize,
+            Some(&parent as *const HANDLE as *const c_void),
+            std::mem::size_of::<HANDLE>(),
+            None,
+            None,
+        )?;
+        let exe = std::env::current_exe().map_err(|_| windows::core::Error::from_win32())?;
+        let dir = HSTRING::from(exe.parent().map(|d| d.as_os_str()).unwrap_or_default());
+        let mut cmd: Vec<u16> = format!("\"{}\" --detached", exe.display()).encode_utf16().chain([0]).collect();
+        let mut si = STARTUPINFOEXW::default();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.lpAttributeList = list;
+        let mut pi = PROCESS_INFORMATION::default();
+        CreateProcessW(
+            PCWSTR::null(),
+            PWSTR(cmd.as_mut_ptr()),
+            None,
+            None,
+            false,
+            EXTENDED_STARTUPINFO_PRESENT,
+            None,
+            &dir,
+            &si.StartupInfo,
+            &mut pi,
+        )?;
+        let _ = CloseHandle(pi.hThread);
+        let _ = CloseHandle(pi.hProcess);
+        Ok(())
+    })();
+    DeleteProcThreadAttributeList(list);
+    let _ = CloseHandle(parent);
+    result
+}
 fn main() {
     unsafe {
+        diag::init();
+        // Self-tests for the crash reporting (run with --attached so they stay in this process).
+        if std::env::args().any(|a| a == "--test-panic") {
+            panic!("test panic requested with --test-panic");
+        }
+        // Before taking the single-instance mutex, so the relaunched copy can take it.
+        if relaunch_outside_job() {
+            return;
+        }
         let _mutex = CreateMutexW(None, true, w!("Local\\TaskDeck.SingleInstance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            diag::log("exit: another TaskDeck is already running");
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        std::panic::set_hook(Box::new(|p| log_crash(&format!("panic: {p}"))));
-        SetUnhandledExceptionFilter(Some(crash_filter));
         migrate_autostart();
 
         let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
@@ -150,6 +216,7 @@ fn main() {
             taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
             bars: [0.0; BANDS],
             bars_running: false,
+            media_source: None,
         };
         if app.cfg.show_battery {
             let (vid, pid) = app.cfg.mouse_receiver;
@@ -173,9 +240,30 @@ fn main() {
         SetTimer(hwnd, TIMER_STATE, STATE_MS, None);
         SetTimer(hwnd, TIMER_POSITION, POSITION_MS, None);
         SetTimer(hwnd, TIMER_BATTERY, BATTERY_MS, None);
+        SetTimer(hwnd, TIMER_HEARTBEAT, HEARTBEAT_MS, None);
+        diag::start_watchdog(hwnd);
+        diag::heartbeat();
+        if std::env::args().any(|a| a == "--test-power") {
+            // Simulates sleep + resume to exercise the power handling.
+            let _ = PostMessageW(hwnd, WM_POWERBROADCAST, WPARAM(PBT_APMSUSPEND), LPARAM(0));
+            let _ = PostMessageW(hwnd, WM_POWERBROADCAST, WPARAM(PBT_APMRESUMEAUTOMATIC), LPARAM(0));
+        }
+        if std::env::args().any(|a| a == "--test-hang") {
+            // Blocks the UI thread so the watchdog reports a hang, then recovers.
+            std::thread::sleep(Duration::from_secs(20));
+        }
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let r = GetMessageW(&mut msg, None, 0, 0).0;
+            if r == 0 {
+                diag::log(&format!("exit: message loop ended normally (code {})", msg.wParam.0));
+                break;
+            }
+            if r == -1 {
+                diag::log(&format!("exit: GetMessage failed: {:?}", windows::core::Error::from_win32()));
+                break;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -210,6 +298,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                 }
                 TIMER_BARS => tick_bars(app),
+                TIMER_HEARTBEAT => diag::heartbeat(),
                 _ => {}
             });
             LRESULT(0)
@@ -269,6 +358,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_COMMAND => {
             match wparam.0 & 0xFFFF {
                 CMD_EXIT => {
+                    diag::log("exit requested from the menu");
                     let _ = DestroyWindow(hwnd);
                 }
                 CMD_AUTOSTART => set_autostart(!autostart_enabled()),
@@ -278,6 +368,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     ShellExecuteW(None, w!("open"), &path, None, None, SW_SHOWNORMAL);
                 }
                 CMD_RELOAD => {
+                    diag::log("settings reloaded");
                     with_app(|app| {
                         app.cfg = config::load();
                         app.vm = None; // log out before logging in again
@@ -307,7 +398,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             });
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_POWERBROADCAST => {
+            match wparam.0 {
+                PBT_APMSUSPEND => diag::log("power: going to sleep"),
+                PBT_APMRESUMESUSPEND | PBT_APMRESUMEAUTOMATIC => {
+                    diag::log("power: resumed from sleep");
+                    with_app(|app| {
+                        // Audio devices and Voicemeeter may have restarted while asleep.
+                        app.mic_targets = None;
+                        poll_state(app);
+                        sync_widgets(app);
+                        redraw(app);
+                    });
+                }
+                _ => {}
+            }
+            LRESULT(1)
+        }
+        WM_QUERYENDSESSION => {
+            diag::log("windows is ending the session (logoff/shutdown)");
+            LRESULT(1)
+        }
+        WM_ENDSESSION => {
+            if wparam.0 != 0 {
+                diag::log("exit: session ending");
+            }
+            LRESULT(0)
+        }
+        WM_DISPLAYCHANGE => {
+            diag::log(&format!("display changed: {}x{}", lparam.0 & 0xFFFF, (lparam.0 >> 16) & 0xFFFF));
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DESTROY => {
+            diag::log("main window destroyed; shutting down");
             with_app(|app| {
                 app.widgets.clear();
                 app.vm = None;
@@ -318,6 +441,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         _ => {
             let is_taskbar_created = with_app(|app| msg != 0 && msg == app.taskbar_created).unwrap_or(false);
             if is_taskbar_created {
+                diag::log("taskbar recreated (Explorer restarted); rebuilding widgets");
                 with_app(|app| {
                     app.widgets.clear();
                     sync_widgets(app);
@@ -346,6 +470,12 @@ fn redraw(app: &mut App) {
 
 fn update_media(app: &mut App) {
     let info = if app.cfg.show_media { media::current() } else { None };
+    let source = info.as_ref().map(|i| i.source.name);
+    let shown = app.view.media.is_some();
+    if source.is_some() != shown || source.is_some_and(|s| Some(s) != app.media_source) {
+        diag::log(&format!("player source: {}", source.unwrap_or("none")));
+    }
+    app.media_source = source;
     let playing = info.as_ref().is_some_and(|i| i.playing);
     // The bars listen to whichever app the player shows.
     spectrum::set_target(info.as_ref().map(|i| i.source.exe));
@@ -382,13 +512,21 @@ fn tick_bars(app: &mut App) {
 /// Returns true when a redraw is needed.
 fn sync_widgets(app: &mut App) -> bool {
     let bars = widget::find_taskbars();
+    let before = app.widgets.len();
     app.widgets.retain(|w| w.alive() && bars.contains(&w.taskbar()));
+    if app.widgets.len() != before {
+        diag::log(&format!("{} widget(s) lost their taskbar", before - app.widgets.len()));
+    }
     let mut need = false;
     for tb in bars {
         if !app.widgets.iter().any(|w| w.taskbar() == tb) {
-            if let Some(w) = Widget::create(app.hwnd, tb) {
-                app.widgets.push(w);
-                need = true;
+            match Widget::create(app.hwnd, tb) {
+                Some(w) => {
+                    app.widgets.push(w);
+                    need = true;
+                    diag::log(&format!("widget created on taskbar {:?} ({} total)", tb.0, app.widgets.len()));
+                }
+                None => diag::log(&format!("could not create widget on taskbar {:?}", tb.0)),
             }
         }
     }

@@ -15,6 +15,11 @@ windows = { version = "0.58", features = [
     "Graphics_Imaging",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Diagnostics_Debug",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
     "Win32_System_Kernel",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -43,5 +48,8 @@ embed-manifest = "1.4"
 opt-level = 3
 lto = true
 codegen-units = 1
-strip = true
+# Keep a PDB (symbols) so crash backtraces and minidumps show file:line.
+# It is a separate file; the exe itself stays small.
+strip = false
+debug = "line-tables-only"
 panic = "abort"
