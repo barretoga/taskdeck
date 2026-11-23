@@ -1,34 +1,46 @@
-﻿//! Dev tool: renders widget states to a BMP so the look can be checked without the taskbar.
-use taskdeck::render::{compose, layout, Item, View};
+﻿//! Dev tool: renders widget states to a BMP without the taskbar.
+//! Usage: preview <out.bmp> [responsive|themes]
+//!   responsive: the same player squeezed into less and less room
+//!   themes:     dark/light, normal and muted + low battery
+use taskdeck::render::{compose, draw_bars, layout, Item, Rgb, View};
 
 fn main() {
     let out = std::env::args().nth(1).unwrap_or_else(|| "preview.bmp".into());
+    let mode = std::env::args().nth(2).unwrap_or_else(|| "responsive".into());
     let scale = 1.5;
     let h = (48.0 * scale) as i32;
-    let v = |battery: u8, light: bool| View {
-        mic: Some(false),
-        speaker: Some(false),
+    let v = |battery: u8, light: bool, muted: bool| View {
+        mic: Some(muted),
+        speaker: Some(muted),
         battery: Some(battery),
         light,
         hover: None::<Item>,
+        media: Some(taskdeck::demo::media(true)),
+        media_text_w: 120,
         ..Default::default()
     };
-    let mut with_media = v(87, false);
-    with_media.media = Some(taskdeck::render::MediaView { title: std::env::args().nth(2).unwrap_or("Song Within A Song".into()), artist: std::env::args().nth(3).unwrap_or("Camel".into()), playing: true, cover: None });
-    with_media.media_text_w = 120;
-    // Responsiveness: the same player squeezed into less and less room (100% scale px).
-    let views: Vec<View> = [520, 420, 330, 270, 230, 200, 150]
-        .iter()
-        .map(|room| taskdeck::render::fit(&with_media, scale, h, Some((*room as f32 * scale) as i32)))
-        .collect();
+    let views: Vec<View> = if mode == "themes" {
+        vec![v(87, false, false), v(15, false, true), v(87, true, false), v(15, true, true)]
+    } else {
+        let full = v(87, false, false);
+        [520, 420, 330, 270, 200]
+            .iter()
+            .map(|room| taskdeck::render::fit(&full, scale, h, Some((*room as f32 * scale) as i32)))
+            .collect()
+    };
+    let levels = [0.55, 0.9, 0.7, 0.45, 0.8, 0.6, 0.35, 0.5, 0.3, 0.2];
     let rows: Vec<_> = views
         .iter()
         .map(|v| {
             let l = layout(v, scale, h);
-            (compose(v, &l, scale), l, v.light)
+            let mut px = compose(v, &l, scale);
+            if let Some(span) = l.span(Item::Bars) {
+                let c = if v.light { Rgb(0x1A, 0x1A, 0x1A) } else { Rgb(0xFF, 0xFF, 0xFF) };
+                draw_bars(&mut px, l.w, h, span, &levels, scale, c);
+            }
+            (px, l, v.light)
         })
-        .collect();
-    let w = rows.iter().map(|r| r.1.w).max().unwrap();
+        .collect();    let w = rows.iter().map(|r| r.1.w).max().unwrap();
     let total_h = h * rows.len() as i32;
     let mut img = vec![0u8; (w * total_h * 3) as usize];
     for (ri, (px, l, light)) in rows.iter().enumerate() {

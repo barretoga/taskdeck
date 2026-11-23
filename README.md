@@ -2,6 +2,8 @@
 
 A small, fast Windows 11 widget written in Rust that lives **inside the taskbar**, just left of the system tray, on every monitor.
 
+![TaskDeck on the Windows 11 taskbar](docs/screenshots/demo.gif)
+
 - **Mic and speaker mute**: one click. It works directly with **Voicemeeter** (Banana / Potato / basic) through its remote API, or with the default Windows devices when Voicemeeter isn't running.
 - **Media player**: cover, title and artist/channel, with back, play/pause and next buttons. It follows whatever is playing: **Spotify** or a **browser** (YouTube and other sites in Brave, Chrome, Edge, Firefox, Opera, Vivaldi). Clicking the cover brings that app to the front.
 - **Audio bars**: a live spectrum of the player's own audio only. It's captured per process with WASAPI process loopback, so Discord and game sounds don't move it. It only runs while something is playing.
@@ -9,6 +11,28 @@ A small, fast Windows 11 widget written in Rust that lives **inside the taskbar*
 - **Responsive layout**: when many apps are open, it shrinks step by step (shorter title â†’ cover only â†’ no bars â†’ no back/next â†’ mute and battery only) so it never covers the app icons.
 
 It uses about 25 MB of RAM and ~0% CPU when idle.
+
+## Screenshots
+
+These were captured from the real widget running on the taskbar in demo mode, so they show made-up data instead of real songs or cover art.
+
+**On the taskbar**, next to the system tray:
+
+![TaskDeck next to the tray](docs/screenshots/taskbar.png)
+
+**Muted mic and speakers, low mouse battery:**
+
+![Muted state with low battery](docs/screenshots/widget-muted.png)
+
+**Dark and light taskbar themes:**
+
+![Dark and light themes](docs/screenshots/themes.png)
+
+**Responsive layout** as the taskbar fills up with app icons. It goes from the full player, to a shorter title, to the cover only, to play/pause only, and finally to mute and battery only:
+
+![Responsive steps](docs/screenshots/responsive.png)
+
+To reproduce the screenshots, run `TaskDeck.exe --attached --demo` (or `--demo-low` for the muted, low-battery state). In demo mode the mute buttons only change the picture; they never mute the real devices.
 
 ## Build
 

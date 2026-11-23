@@ -13,6 +13,7 @@ use taskdeck::render::{Item, MediaView, Rgb, View};
 use taskdeck::spectrum::{self, BANDS};
 use taskdeck::voicemeeter::Voicemeeter;
 use taskdeck::widget::{self, Widget, WM_WIDGET_CLICK, WM_WIDGET_HOVER, WM_WIDGET_MENU};
+use taskdeck::demo::{self, Demo};
 use taskdeck::{battery, diag, resolve_mic, targets};
 
 use windows::core::{w, HSTRING, PCWSTR};
@@ -65,6 +66,9 @@ struct App {
     bars: [f32; BANDS],
     bars_running: bool,
     media_source: Option<&'static str>,
+    /// Demo mode: made-up data for screenshots (see demo.rs).
+    demo: Option<Demo>,
+    demo_muted: (bool, bool),
 }
 
 thread_local! {
@@ -203,9 +207,13 @@ fn main() {
         .expect("CreateWindowExW");
 
         let cfg = config::load();
+        let demo = demo::from_args();
+        if let Some(d) = demo {
+            diag::log(&format!("demo mode: {d:?}"));
+        }
         let app = App {
             hwnd,
-            vm: connect_vm(&cfg),
+            vm: if demo.is_some() { None } else { connect_vm(&cfg) },
             cfg,
             mic_targets: None,
             audio: Audio::new().ok(),
@@ -217,12 +225,16 @@ fn main() {
             bars: [0.0; BANDS],
             bars_running: false,
             media_source: None,
+            demo,
+            demo_muted: demo.map(|d| (d.muted, d.muted)).unwrap_or_default(),
         };
-        if app.cfg.show_battery {
+        if app.demo.is_some() {
+            // Nothing real is read or controlled in demo mode.
+        } else if app.cfg.show_battery {
             let (vid, pid) = app.cfg.mouse_receiver;
             battery::start_receiver(hwnd, WM_BATTERY, vid, pid);
         }
-        if app.cfg.show_media {
+        if app.cfg.show_media && app.demo.is_none() {
             media::set_sources(&app.cfg.media_sources);
             media::start(hwnd, WM_MEDIA);
             if app.cfg.show_bars {
@@ -232,6 +244,9 @@ fn main() {
         APP.with(|a| *a.borrow_mut() = Some(app));
 
         with_app(|app| {
+            if app.demo.is_some() {
+                update_media(app);
+            }
             poll_state(app);
             refresh_battery(app);
             sync_widgets(app);
@@ -329,7 +344,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     Some(Item::Previous) => media::send(Cmd::Previous),
                     Some(Item::Next) => media::send(Cmd::Next),
                     Some(Item::PlayPause) => {
-                        media::send(Cmd::PlayPause);
+                        if app.demo.is_none() {
+                            media::send(Cmd::PlayPause);
+                        } else if !app.bars_running {
+                            SetTimer(app.hwnd, TIMER_BARS, BARS_MS, None);
+                            app.bars_running = true;
+                        }
                         // Show the new state right away; the media thread confirms it.
                         if let Some(m) = &mut app.view.media {
                             m.playing = !m.playing;
@@ -469,6 +489,15 @@ fn redraw(app: &mut App) {
 }
 
 fn update_media(app: &mut App) {
+    if app.demo.is_some() {
+        let playing = app.view.media.as_ref().map_or(true, |m| m.playing);
+        app.view.media = Some(demo::media(playing));
+        if !app.bars_running {
+            unsafe { SetTimer(app.hwnd, TIMER_BARS, BARS_MS, None) };
+            app.bars_running = true;
+        }
+        return;
+    }
     let info = if app.cfg.show_media { media::current() } else { None };
     let source = info.as_ref().map(|i| i.source.name);
     let shown = app.view.media.is_some();
@@ -489,7 +518,12 @@ fn update_media(app: &mut App) {
 
 /// One animation frame: rise fast, fall slowly. Stops itself once paused and settled.
 fn tick_bars(app: &mut App) {
-    let target = spectrum::levels();
+    let playing = app.view.media.as_ref().is_some_and(|m| m.playing);
+    let target = match app.demo {
+        Some(_) if playing => demo::levels(),
+        Some(_) => [0.0; BANDS],
+        None => spectrum::levels(),
+    };
     let mut moving = false;
     for (d, &t) in app.bars.iter_mut().zip(target.iter()) {
         *d = if t > *d { *d + (t - *d) * 0.6 } else { (*d - 0.045).max(t) };
@@ -498,7 +532,6 @@ fn tick_bars(app: &mut App) {
     for w in &mut app.widgets {
         w.render_bars(&app.bars);
     }
-    let playing = app.view.media.as_ref().is_some_and(|m| m.playing);
     if !moving && !playing {
         unsafe {
             let _ = KillTimer(app.hwnd, TIMER_BARS);
@@ -553,6 +586,13 @@ fn vm_muted(vm: &Voicemeeter, list: &[String]) -> Option<bool> {
 
 /// Reads mute states. Returns true when something changed.
 fn poll_state(app: &mut App) -> bool {
+    if app.demo.is_some() {
+        let (mic, spk) = (Some(app.demo_muted.0), Some(app.demo_muted.1));
+        let changed = mic != app.view.mic || spk != app.view.speaker;
+        app.view.mic = mic;
+        app.view.speaker = spk;
+        return changed;
+    }
     if Instant::now() < app.ignore_poll_until {
         return false; // Voicemeeter applies sets asynchronously; avoid flicker
     }
@@ -575,6 +615,16 @@ fn poll_state(app: &mut App) -> bool {
 }
 
 fn toggle(app: &mut App, item: Item) {
+    if app.demo.is_some() {
+        // Picture only: the real microphone/speakers are never touched in demo mode.
+        if item == Item::Mic {
+            app.demo_muted.0 = !app.demo_muted.0;
+        } else {
+            app.demo_muted.1 = !app.demo_muted.1;
+        }
+        poll_state(app);
+        return;
+    }
     let current = if item == Item::Mic { app.view.mic } else { app.view.speaker };
     let Some(current) = current else { return };
     let target = !current;
@@ -601,7 +651,11 @@ fn toggle(app: &mut App, item: Item) {
 
 /// Returns true when the shown value changed.
 fn refresh_battery(app: &mut App) -> bool {
-    let now = if app.cfg.show_battery { battery::read() } else { None };
+    let now = match app.demo {
+        Some(d) => Some(("Demo Mouse".to_string(), d.battery)),
+        None if app.cfg.show_battery => battery::read(),
+        None => None,
+    };
     let pct = now.as_ref().map(|(_, p)| *p);
     app.battery_name = now.map(|(n, _)| n).unwrap_or_default();
     let changed = pct != app.view.battery;
