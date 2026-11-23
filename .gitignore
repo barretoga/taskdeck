@@ -10,3 +10,6 @@ taskdeck-crash.log
 taskdeck.log
 taskdeck.log.1
 /crashes/
+
+# Social media assets (not part of the project)
+docs/linkedin/

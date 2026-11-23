@@ -70,7 +70,11 @@ fn cover() -> Cover {
 /// Lively, music-like bar levels from a few mixed sine waves.
 pub fn levels() -> [f32; BANDS] {
     static START: OnceLock<Instant> = OnceLock::new();
-    let t = START.get_or_init(Instant::now).elapsed().as_secs_f32();
+    levels_at(START.get_or_init(Instant::now).elapsed().as_secs_f32())
+}
+
+/// Same as `levels`, at a given time in seconds (for rendering animation frames).
+pub fn levels_at(t: f32) -> [f32; BANDS] {
     let beat = (0.5 + 0.5 * (t * 7.5).sin()).powi(3); // ~1.2 beats per second
     let mut out = [0.0; BANDS];
     for (i, v) in out.iter_mut().enumerate() {

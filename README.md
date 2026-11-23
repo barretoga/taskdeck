@@ -34,6 +34,15 @@ These were captured from the real widget running on the taskbar in demo mode, so
 
 To reproduce the screenshots, run `TaskDeck.exe --attached --demo` (or `--demo-low` for the muted, low-battery state). In demo mode the mute buttons only change the picture; they never mute the real devices.
 
+## Install
+
+1. Download `TaskDeck-v1.0.0-windows-x64.zip` from the [latest release](https://github.com/barretoga/taskdeck/releases/latest).
+2. Extract it to a folder you will keep, for example `C:\Tools\TaskDeck`. The settings file and logs are created next to the exe.
+3. Run `TaskDeck.exe`. The widget appears in the taskbar, left of the tray.
+4. Right-click the widget and choose **Start with Windows** to launch it at every login.
+
+Windows SmartScreen may warn the first time, because the exe isn't code-signed. Click **More info → Run anyway**.
+
 ## Build
 
 Requires Rust (MSVC toolchain) on Windows 10 2004+ / Windows 11.
@@ -89,3 +98,8 @@ Self-tests (run with `--attached`): `--test-panic`, `--test-hang`, `--test-power
 | `src/audio.rs`, `src/voicemeeter.rs` | Mute backends |
 | `src/battery.rs` | 2.4 GHz receiver and Bluetooth battery |
 | `src/bin/*` | Small read-only diagnostic tools used during development |
+
+## License
+
+[MIT](LICENSE) © 2026 Gabriel Barreto
+

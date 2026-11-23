@@ -1,6 +1,9 @@
 ﻿[package]
 name = "taskdeck"
-version = "0.2.0"
+version = "1.0.0"
+description = "Windows 11 taskbar widget: Voicemeeter mute, media player with audio bars, mouse battery"
+license = "MIT"
+repository = "https://github.com/barretoga/taskdeck"
 edition = "2021"
 
 [dependencies]
